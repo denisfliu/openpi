@@ -9,6 +9,10 @@ import numpy as np
 import tqdm
 import tyro
 
+# Apply lerobot patch first
+from openpi.shared import lerobot_patch
+lerobot_patch.apply_lerobot_patch()
+
 import openpi.models.model as _model
 import openpi.shared.normalize as normalize
 import openpi.training.config as _config
@@ -90,14 +94,10 @@ def main(config_name: str, max_frames: int | None = None):
     config = _config.get_config(config_name)
     data_config = config.data.create(config.assets_dirs, config.model)
 
-    if data_config.rlds_data_dir is not None:
-        data_loader, num_batches = create_rlds_dataloader(
-            data_config, config.model.action_horizon, config.batch_size, max_frames
-        )
-    else:
-        data_loader, num_batches = create_torch_dataloader(
-            data_config, config.model.action_horizon, config.batch_size, config.model, config.num_workers, max_frames
-        )
+    # For now, we only support torch datasets (LeRobot format)
+    data_loader, num_batches = create_torch_dataloader(
+        data_config, config.model.action_horizon, config.batch_size, config.model, config.num_workers, max_frames
+    )
 
     keys = ["state", "actions"]
     stats = {key: normalize.RunningStats() for key in keys}

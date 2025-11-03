@@ -15,6 +15,7 @@ import tyro
 
 import openpi.models.model as _model
 import openpi.models.pi0 as pi0
+import openpi.models.pi0_config
 import openpi.models.pi0_fast as pi0_fast
 import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
@@ -90,6 +91,9 @@ class DataConfig:
 
     # If true, will disable syncing the dataset from the Hugging Face Hub. Allows training on local-only datasets.
     local_files_only: bool = False
+    
+    # Path to RLDS data directory (for DROID datasets). If None, uses LeRobot format.
+    rlds_data_dir: str | None = None
 
 
 class GroupFactory(Protocol):
@@ -289,7 +293,7 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
         # how to modify the transforms to match your dataset. Once you created your own transforms, you can
         # replace the transforms below with your own.
         data_transforms = _transforms.Group(
-            inputs=[libero_policy.LiberoInputs(action_dim=model_config.action_dim, model_type=model_config.model_type)],
+            inputs=[libero_policy.LiberoInputs(model_type=model_config.model_type)],
             outputs=[libero_policy.LiberoOutputs()],
         )
 
@@ -316,6 +320,62 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
         model_transforms = ModelTransformFactory()(model_config)
 
         # We return all data transforms for training and inference. No need to change anything here.
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+        )
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotPenguinGraspDataConfig(DataConfigFactory):
+    """
+    Config for Penguin Grasp dataset using DroneVLA policy for image processing.
+    The dataset already contains actions in the appropriate format (no delta conversion needed).
+    Padding is done AFTER normalization (in model_transforms) from 7 to 32 dimensions.
+    """
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        # Repack transform to match keys from dataset to expected format
+        # Dataset has keys: image, wrist_image, state, actions, task
+        # DroneVLAInputs expects: observation/3pov_1, observation/wrist_image, observation/image, observation/state, actions, prompt
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/3pov_1": "image",  # Base camera (third-person view)
+                        "observation/wrist_image": "wrist_image",  # Left wrist camera
+                        "observation/image": "image",  # Right wrist camera (using same as base for now)
+                        "observation/state": "state",
+                        "actions": "actions",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+
+        # Data transforms - using DroneVLAInputs/Outputs
+        # DroneVLAInputs handles image parsing only (no padding)
+        data_transforms = _transforms.Group(
+            inputs=[dronevla_policy.DroneVLAInputs(model_type=model_config.model_type)],
+            outputs=[dronevla_policy.DroneVLAOutputs()],
+        )
+
+        # Note: We do NOT apply DeltaActions transform here since the dataset
+        # already has actions in the appropriate format
+
+        # Model transforms (tokenization, etc.)
+        # Add PadStatesAndActions AFTER normalization (in model_transforms) to pad from 7 to 32 dimensions
+        base_model_transforms = ModelTransformFactory()(model_config)
+        model_transforms = _transforms.Group(
+            inputs=[
+                *base_model_transforms.inputs,
+                _transforms.PadStatesAndActions(model_action_dim=model_config.action_dim),
+            ],
+            outputs=base_model_transforms.outputs,
+        )
+
         return dataclasses.replace(
             self.create_base_config(assets_dirs),
             repack_transforms=repack_transform,
@@ -410,7 +470,7 @@ class TrainConfig:
     # Defines the model config. Some attributes (action_dim, action_horizon, and max_token_len) are shared by all models
     # -- see BaseModelConfig. Specific model implementations (e.g., Pi0Config) inherit from BaseModelConfig and may
     # define additional attributes.
-    model: _model.BaseModelConfig = dataclasses.field(default_factory=pi0.Pi0Config)
+    model: _model.BaseModelConfig = dataclasses.field(default_factory=openpi.models.pi0_config.Pi0Config)
 
     # A weight loader can optionally load (possibly partial) weights from disk after the model is initialized.
     weight_loader: weight_loaders.WeightLoader = dataclasses.field(default_factory=weight_loaders.NoOpWeightLoader)
@@ -493,14 +553,14 @@ _CONFIGS = [
     #
     TrainConfig(
         name="pi0_aloha",
-        model=pi0.Pi0Config(),
+        model=openpi.models.pi0_config.Pi0Config(),
         data=LeRobotAlohaDataConfig(
             assets=AssetsConfig(asset_id="trossen"),
         ),
     ),
     TrainConfig(
         name="pi0_aloha_towel",
-        model=pi0.Pi0Config(),
+        model=openpi.models.pi0_config.Pi0Config(),
         data=LeRobotAlohaDataConfig(
             assets=AssetsConfig(asset_id="trossen"),
             default_prompt="fold the towel",
@@ -508,7 +568,7 @@ _CONFIGS = [
     ),
     TrainConfig(
         name="pi0_aloha_tupperware",
-        model=pi0.Pi0Config(),
+        model=openpi.models.pi0_config.Pi0Config(),
         data=LeRobotAlohaDataConfig(
             assets=AssetsConfig(asset_id="trossen"),
             default_prompt="open the tupperware and put the food on the plate",
@@ -519,7 +579,7 @@ _CONFIGS = [
     #
     TrainConfig(
         name="pi0_droid",
-        model=pi0.Pi0Config(action_horizon=10),
+        model=openpi.models.pi0_config.Pi0Config(action_horizon=10),
         data=SimpleDataConfig(
             assets=AssetsConfig(asset_id="droid"),
             data_transforms=lambda model: _transforms.Group(
@@ -559,7 +619,7 @@ _CONFIGS = [
         # Here you define the model config -- In this example we use pi0 as the model
         # architecture and perform *full* finetuning. in the examples below we show how to modify
         # this to perform *low-memory* (LORA) finetuning and use pi0-FAST as an alternative architecture.
-        model=pi0.Pi0Config(),
+        model=openpi.models.pi0_config.Pi0Config(),
         # Here you define the dataset you are training on. In this example we use the Libero
         # dataset. For your own dataset, you can change the repo_id to point to your dataset.
         # Also modify the DataConfig to use the new config you made for your dataset above.
@@ -583,7 +643,7 @@ _CONFIGS = [
     TrainConfig(
         name="pi0_libero_low_mem_finetune",
         # Here is an example of loading a pi0 model for LoRA fine-tuning.
-        model=pi0.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
+        model=openpi.models.pi0_config.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
         data=LeRobotLiberoDataConfig(
             repo_id="physical-intelligence/libero",
             base_config=DataConfig(
@@ -597,7 +657,7 @@ _CONFIGS = [
         # We have a convenience function in the model config that returns the default freeze filter
         # for the given model config for LoRA finetuning. Just make sure it matches the model config
         # you chose above.
-        freeze_filter=pi0.Pi0Config(
+        freeze_filter=openpi.models.pi0_config.Pi0Config(
             paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
         ).get_freeze_filter(),
         # Turn off EMA for LoRA finetuning.
@@ -666,7 +726,7 @@ _CONFIGS = [
         # Here you define the model config -- In this example we use pi0 as the model
         # architecture and perform *full* finetuning. in the examples below we show how to modify
         # this to perform *low-memory* (LORA) finetuning and use pi0-FAST as an alternative architecture.
-        model=pi0.Pi0Config(),
+        model=openpi.models.pi0_config.Pi0Config(),
         # Here you define the dataset you are training on. In this example we use the Libero
         # dataset. For your own dataset, you can change the repo_id to point to your dataset.
         # Also modify the DataConfig to use the new config you made for your dataset above.
@@ -690,7 +750,7 @@ _CONFIGS = [
     TrainConfig(
         name="pi0_dronevla_low_mem_finetune",
         # Here is an example of loading a pi0 model for LoRA fine-tuning.
-        model=pi0.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
+        model=openpi.models.pi0_config.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
         data=LeRobotDroneVLADataConfig(
             repo_id="physical-intelligence/dronevla",
             base_config=DataConfig(
@@ -704,7 +764,7 @@ _CONFIGS = [
         # We have a convenience function in the model config that returns the default freeze filter
         # for the given model config for LoRA finetuning. Just make sure it matches the model config
         # you chose above.
-        freeze_filter=pi0.Pi0Config(
+        freeze_filter=openpi.models.pi0_config.Pi0Config(
             paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
         ).get_freeze_filter(),
         # Turn off EMA for LoRA finetuning.
@@ -760,13 +820,63 @@ _CONFIGS = [
     ),
 
     #
+    # Penguin Grasp dataset configs.
+    #
+    TrainConfig(
+        name="pi0_penguin_grasp",
+        # Use action_dim=32 to match base model, actions will be padded from 7 to 32
+        model=openpi.models.pi0_config.Pi0Config(action_dim=32, action_horizon=10),
+        data=LeRobotPenguinGraspDataConfig(
+            repo_id="penguin_grasp",
+            base_config=DataConfig(
+                local_files_only=True,
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+    ),
+    TrainConfig(
+        name="pi0_penguin_grasp_low_mem_finetune",
+        # LoRA finetuning for low-memory training
+        # Use action_dim=32 to match base model, actions will be padded from 7 to 32
+        model=openpi.models.pi0_config.Pi0Config(
+            action_dim=32, 
+            action_horizon=10,
+            paligemma_variant="gemma_2b_lora", 
+            action_expert_variant="gemma_300m_lora"
+        ),
+        data=LeRobotPenguinGraspDataConfig(
+            repo_id="penguin_grasp",
+            # Use the same assets as the full finetune config
+            assets=AssetsConfig(
+                assets_dir="./assets/pi0_penguin_grasp",
+                asset_id="penguin_grasp",
+            ),
+            base_config=DataConfig(
+                local_files_only=True,
+                prompt_from_task=True,
+            ),
+        ),
+        # Now we can load the full checkpoint including action expert
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        # Freeze filter for LoRA finetuning
+        freeze_filter=openpi.models.pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora", 
+            action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        # Turn off EMA for LoRA finetuning
+        ema_decay=None,
+    ),
+    #
     # Fine-tuning Aloha configs.
     #
     # This is a test config that is used to illustate how train on a custom LeRobot dataset.
     # For instuctions on how to convert and train on your own Aloha dataset see examples/aloha_real/README.md
     TrainConfig(
         name="pi0_aloha_pen_uncap",
-        model=pi0.Pi0Config(),
+        model=openpi.models.pi0_config.Pi0Config(),
         data=LeRobotAlohaDataConfig(
             repo_id="physical-intelligence/aloha_pen_uncap_diverse",
             assets=AssetsConfig(
@@ -799,7 +909,7 @@ _CONFIGS = [
     # This config is used to demonstrate how to train on a simple simulated environment.
     TrainConfig(
         name="pi0_aloha_sim",
-        model=pi0.Pi0Config(),
+        model=openpi.models.pi0_config.Pi0Config(),
         data=LeRobotAlohaDataConfig(
             repo_id="lerobot/aloha_sim_transfer_cube_human",
             default_prompt="Transfer cube",
@@ -815,7 +925,7 @@ _CONFIGS = [
         name="debug",
         data=FakeDataConfig(),
         batch_size=2,
-        model=pi0.Pi0Config(paligemma_variant="dummy", action_expert_variant="dummy"),
+        model=openpi.models.pi0_config.Pi0Config(paligemma_variant="dummy", action_expert_variant="dummy"),
         save_interval=100,
         overwrite=True,
         exp_name="debug",
@@ -826,7 +936,7 @@ _CONFIGS = [
         name="debug_restore",
         data=FakeDataConfig(),
         batch_size=2,
-        model=pi0.Pi0Config(paligemma_variant="dummy", action_expert_variant="dummy"),
+        model=openpi.models.pi0_config.Pi0Config(paligemma_variant="dummy", action_expert_variant="dummy"),
         weight_loader=weight_loaders.CheckpointWeightLoader("./checkpoints/debug/debug/9/params"),
         overwrite=True,
         exp_name="debug",
