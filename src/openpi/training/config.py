@@ -338,15 +338,15 @@ class LeRobotPenguinGraspDataConfig(DataConfigFactory):
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
         # Repack transform to match keys from dataset to expected format
-        # Dataset has keys: image, wrist_image, state, actions, task
+        # Dataset has keys: image, wrist_image, 3pov_1, 3pov_2, state, actions, task
         # DroneVLAInputs expects: observation/3pov_1, observation/wrist_image, observation/image, observation/state, actions, prompt
         repack_transform = _transforms.Group(
             inputs=[
                 _transforms.RepackTransform(
                     {
-                        "observation/3pov_1": "image",  # Base camera (third-person view)
-                        "observation/wrist_image": "wrist_image",  # Left wrist camera
-                        "observation/image": "image",  # Right wrist camera (using same as base for now)
+                        "observation/3pov_1": "3pov_1",  # Third-person view camera 1
+                        "observation/wrist_image": "wrist_image",  # Wrist camera
+                        "observation/image": "image",  # Base camera
                         "observation/state": "state",
                         "actions": "actions",
                         "prompt": "prompt",
