@@ -841,8 +841,8 @@ _CONFIGS = [
         # LoRA finetuning for low-memory training
         # Use action_dim=32 to match base model, actions will be padded from 7 to 32
         model=openpi.models.pi0_config.Pi0Config(
-            action_dim=32, 
-            action_horizon=10,
+            # action_dim=32, 
+            # action_horizon=10,
             paligemma_variant="gemma_2b_lora", 
             action_expert_variant="gemma_300m_lora"
         ),
